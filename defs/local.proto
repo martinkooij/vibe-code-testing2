@@ -1,0 +1,440 @@
+// ---------------------------------------------------------------------
+//                                   LOCAL API
+// This is the Local Rocsys API version v1alpha.
+// The API is a gRPC API for compact/reliable information exchange between Site Management systems and/or vehicles and the Automatic Charging Device (Rocsys Robot).
+// This proto file defines the services, the API calls and the exchange messages
+// The proto language file can be used to compile an Rocsys API SDK in the desired language via a proto compiler (see grcp.io)
+// (c) Rocsys BV 2024
+// -----------------------------------------------------------------------
+
+syntax = "proto3";
+
+package rocsys.os.local.v2alpha;
+
+// Operational command results, agreed over both the Rocsys API's (local and cloud connected).
+// result types that only have a meaning in ROCs before 1Q2024 are not included
+
+enum OperationResult {
+  OPERATION_RESULT_UNSPECIFIED = 0;
+  OPERATION_RESULT_SUCCESS = 1;
+  OPERATION_RESULT_NO_SOCKET_DETECTED = 2;
+  OPERATION_RESULT_ABORTED = 3;
+  OPERATION_RESULT_HALTED = 4;
+  OPERATION_RESULT_MAX_DOCKING_ATTEMPTS_REACHED = 5;
+  OPERATION_RESULT_MAX_UNDOCKING_ATTEMPTS_REACHED = 6;
+  OPERATION_RESULT_SOCKET_OUTSIDE_MATING_SPACE = 7;
+  OPERATION_RESULT_GENERAL_ISSUE = 20;
+}
+
+// Externally published states & detailed states, as agreed over both the Rocsys API's (local and cloud connected)
+// RECOVERING is added in april 2025
+// Unknown intermediate states are not externally exposed
+enum State {
+  STATE_UNSPECIFIED = 0;
+  STATE_MAINTENANCE = 1;
+  STATE_IRRECOVERABLE = 2;
+  STATE_RECOVERABLE = 3;
+  STATE_OPERATIONAL = 4;
+  STATE_HARDWARE_SAFETY = 5;
+  STATE_RECOVERING = 6;
+}
+
+// Externally visible detailed states
+enum DetailedState {
+  DETAILED_STATE_UNSPECIFIED = 0;
+  DETAILED_STATE_IRRECOVERABLE = 1;
+  DETAILED_STATE_RECOVERABLE_AUTORECOVERED = 2;
+  DETAILED_STATE_RECOVERABLE_STORED = 3;
+  DETAILED_STATE_OPERATIONAL_CONNECTED = 4;
+  DETAILED_STATE_OPERATIONAL_MOVING = 5;
+  DETAILED_STATE_OPERATIONAL_DOCKING = 6;
+  DETAILED_STATE_OPERATIONAL_UNDOCKING = 7;
+  DETAILED_STATE_OPERATIONAL_STORED = 8;
+  DETAILED_STATE_HARDWARE_SAFETY = 9;
+  DETAILED_STATE_RECOVERING_AUTORECOVER = 10;
+}
+
+// UUID is no pre-defined proto type. Conventionally we will use a string.
+message UUID {
+  string uuid = 1;
+}
+
+// Message containing externally exposed state information
+// Contains operation in transition indicator as helpers for the for the async ops. If a state is reached
+// the result is returned
+// For support purposes by a Fleet Management system a bool (in_progress) is returned,
+// to indicate if an ACDC cycle with a vehicle is actually in progress.
+// If so, an acdc uuid is supplied as well.
+message RocState {
+  State state = 1; // current state or state that has been left most recently in case of polling result
+  DetailedState detailed_state = 2; // current detailed state or detailed state that has been left most recently in case of polling result
+  bool in_progress = 3; // There is an active ACDC in progress
+  optional UUID acdc_uuid = 4; // available in case of an active ACD cycle ongoing.
+  bool is_transitioning = 5; // true in case of the state is not stable to receive another command
+  optional OperationResult result = 6; // Result value of the last executed command, if available.
+}
+
+// API Call return error messages, to be returned when the API call cannot execute with the parameters supplied
+message Issue {
+  message Unknown {}
+  message TokenDenied {}
+  message UnsupportedGetTokenMethod {}
+  message IsTransitioning {}
+  message PreconditionNotMet {
+    string explanation = 1;
+  }
+}
+
+// --------------------------------------------------------------------------
+//                                Access rules
+// Access to the API Calls is depending on a bearer JWT token to be inserted into the Authorization Header of each call
+// A JWT Token must be obtained via the GetToken Call.
+//   - Calling a API call with an invalid or no JWT token will give a 401 error.
+//   - In case the Token is valid, but denies access to the call a 403 error will be returned.
+//
+// The default access (for clarification) is as follows:
+//   - The GetToken and APIVersion and RocInfo calls do need to have Tokens and can be called to getting a Token,
+//     determine API version and identify the connected ROC.
+//   - Unauthorized and Authorized Vehicles will be allowed to use all ACDC service calls.
+//   - Authorized Site Management Systems will typically be allowed all Admin, all ACDC service calls and the Robot Command Calls
+//   - (Locally present) Service Personnel will be able to call all of the above + the Service service calls, such as StateStreamPlus and Robot
+// Per customer a fine grained RBAC matrix is created to business rules for access.
+// These can be different from the above described default.
+//
+// -------------------------------------------------------------------------
+
+// --------------------------------------------------------------
+//  Service containing the Administrative Rocsys Local API Commands. These calls can be called without Authorization
+// ------------------------------------------------------------
+
+service AdministrationService {
+  //  GetToken is called with credentials and returns a token that must be used for subsequent calls
+  rpc GetToken(GetTokenRequest) returns (GetTokenResponse);
+
+  // Call to retrieve the major and minor version of the API. Can be used by clients to adapt behavior (e.g. when charging with an older Rocsys Robot or a newer one).
+  rpc ApiVersion(ApiVersionRequest) returns (ApiVersionResponse);
+
+  // Call to identify the Roc you are connected to.
+  rpc RocInfo(RocInfoRequest) returns (RocInfoResponse);
+
+  rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+// GeTokenRequest carries the credentials for authorization, where its format is depending on token retrieval method
+// Only two token retrieval methods are currently supported. GetToken without credentials method and GetToken with EquipmentId
+// As described above in the default case the NoCredentials GetToken method will return a Token that provides access
+// to the ACD Cycle service API calls only.
+// This, however, is dependent on the customer and site configuration and will in general be more restricted
+message GetTokenRequest {
+  oneof credentials {
+    AuthNoCredentials no_credentials = 1;
+    AuthEquipmentId equipment_id = 2; // Is supported, but will be handled as AuthNoCredentials, discarding the ID
+    AuthUnamePassword uname_password = 3; // as of now unsupported
+    AuthMachineCredentials machine_credentials = 4; // as of now unsupported
+    AuthIso15118_2 iso_15118_2 = 5; // as of now unsupported
+  }
+}
+
+message AuthNoCredentials {}
+
+message AuthUnamePassword {
+  // user name, often in email format
+  string uname = 1;
+  // password string
+  string password = 2;
+}
+
+message AuthMachineCredentials {
+  // machine id name, often in email format (like rcm0001@machines.rocsys.com)
+  string machine_id = 1;
+  // secret string
+  string machine_secret = 2;
+}
+
+message AuthEquipmentId {
+  string equipment_id = 1;
+}
+
+message AuthIso15118_2 {}
+
+// GetTokenResponse  returns a payload with  token and its validity in seconds or else an issue indication
+message GetTokenResponse {
+  message Payload {
+    // JWT token to be used in authorization bearer on subsequent API calls
+    string bearer_token = 1;
+    // validity of token in seconds after creation
+    uint32 validity = 2;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.UnsupportedGetTokenMethod unsupported_get_token_method = 2;
+    Issue.TokenDenied token_denied = 3;
+  }
+}
+
+message ApiVersionRequest {}
+
+message ApiVersionResponse {
+  // returns the available major api_versions on the robot, e.g., "[1,2]" if both API version 1 and 2 are available
+  repeated uint32 api_major_version = 1;
+  // return the minor version of the highest available major version. This allows for probing the existence of
+  // non-breaking extensions.
+  uint32 api_minor_version = 2;
+  string api_minor_version_marker = 3; // e.g. alpha, beta or a Github tag. Empty string normally.
+}
+
+message RocInfoRequest {}
+
+message RocInfoResponse {
+  UUID uuid = 1;
+  string serial_number = 2;
+  string software_version = 3;
+  string roc_type_name = 4;
+  string iot_id = 5;
+}
+
+// Ping
+message EchoRequest {}
+
+// Pong
+message EchoResponse {}
+
+// --------------------------------------------------------------
+// Service containing the Basic Operational Rocsys Local API Commands for managing the ACD Cycle
+// Claims abbreviations are short names as follows:
+//    the first capital, followed by the small caps name until the next capital, followed a maximum of two capitals in the rest of the service/method name
+// For this service: "acd": {"dockb", "statep", "halt", "undockb", "undocka", "states", "abort", "docka"}
+//
+// Sync operations: start in a state and only returns when in the next state.
+// Async operation: starts in a state and return immediately. Polling is needed to see if the next
+// stable state has been reached.
+// ------------------------------------------------------------
+
+service ACDCService {
+  // Blocking call to start a docking sequence.
+  // returns immediately with error if the preconditions to call this function are not met
+  // returns with operation results after docking sequence completed and charging can start (happy path) or stopped (with reason as result).
+  // The maximum duration is depending on robot hardware and software version and outside circumstances, but can be in the minute range.
+  // This call should not be used in a single threaded client if other actions are expected.
+  rpc DockBlocking(DockBlockingRequest) returns (DockBlockingResponse);
+
+  // Async Call to start a docking sequence
+  // returns immediately with error if the preconditions to call this function are not met
+  // returns immediately with empty response if the action is started
+  // use polling or streaming to wait for completion of the operation.
+  rpc DockAsync(DockAsyncRequest) returns (DockAsyncResponse);
+
+  // Blocking call to start an undocking sequence.
+  // returns immediately with error if the preconditions to call this function are not met
+  // returns with operation results after undocking sequence completed and charging can start (happy path) or stopped (with reason as result).
+  // The maximum duration is depending on robot hardware and software version and outside circumstances, but can be in the minute range.
+  // This call should not be used in a single threaded client if other actions are expected.
+  rpc UndockBlocking(UndockBlockingRequest) returns (UndockBlockingResponse);
+
+  // Async Call to start an undocking sequence
+  // returns immediately with error if the preconditions to call this function are not met
+  // returns immediately with empty response if the action is started
+  // use polling or streaming to wait for completion of the operation.
+  rpc UndockAsync(UndockAsyncRequest) returns (UndockAsyncResponse);
+
+  // Asynchronous call to Halt the system (= immediately stops all movements, accepting during docking, undocking and recovery)
+  // The robot goes in recoverable state and can be recovered to operational with manual inspection
+  rpc Halt(HaltRequest) returns (HaltResponse);
+
+  // Asynchronous call to abort the current docking operation and go to the operational stored state (abort only accepted during Docking process)
+  // Use polling or streaming to see if the robot has finished the abortion sequence and is ready to accept the next attempt.
+  rpc Abort(AbortRequest) returns (AbortResponse);
+
+  // Call to poll the state
+  rpc StatePoll(StateRequest) returns (StateResponse);
+
+  // Call that opens a stream of states and results, can be used instead of polling in a multi-threaded client to keep track of the state.
+  rpc StateStream(StateRequest) returns (stream StateResponse);
+}
+
+message DockBlockingRequest {
+  // Temporary solution to correlate a docking request with an acd_cycle UUID from the WatchOperations stream in the MonitorService
+  // If provided, the given UUID will be used in the WatchOperations response for this acd_cycle
+  optional UUID acd_cycle_uuid = 1;
+}
+
+message DockBlockingResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.IsTransitioning is_transitioning = 2;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+  }
+}
+
+message DockAsyncRequest {
+  // Temporary solution to correlate a docking request with an acd_cycle UUID from the WatchOperations stream in the MonitorService
+  // If provided, the given UUID will be used in the WatchOperations response for this acd_cycle
+  optional UUID acd_cycle_uuid = 1;
+}
+
+message DockAsyncResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.IsTransitioning is_transitioning = 2;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+  }
+}
+
+message UndockBlockingRequest {}
+
+message UndockBlockingResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.IsTransitioning is_transitioning = 2;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+  }
+}
+
+message UndockAsyncRequest {}
+
+message UndockAsyncResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.IsTransitioning is_transitioning = 2;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+  }
+}
+
+message HaltRequest {}
+
+message HaltResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+    Issue.Unknown unknown = 4;
+  }
+}
+
+message AbortRequest {}
+
+message AbortResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+    Issue.Unknown unknown = 4;
+  }
+}
+
+message StateRequest {}
+
+message StateResponse {
+  RocState state = 1;
+}
+
+// ---------------------------------------------------------------
+// Service containing the Robot Management Calls
+// Claims abbreviation: "managements": {"releaseto", "confirmr", "autora", "autorb"}
+// ----------------------------------------------------------------
+
+service ManagementService {
+  // Blocking call to start the recovery sequence. After successful completion Roc is ready to be
+  // put into use after visual confirmation.
+  // Do not use this call in a single threaded environment, when other actions are expected.
+  rpc AutoRecoverBlocking(AutoRecoverBlockingRequest) returns (AutoRecoverBlockingResponse);
+  // Async call to start the recovery sequence.
+  // Use polling or the state stream to follow the progress
+  rpc AutoRecoverAsync(AutoRecoverAsyncRequest) returns (AutoRecoverAsyncResponse);
+  // Async call to confirm recovery, needing visual inspection and confirmation
+  rpc ConfirmRecovery(ConfirmRecoveryRequest) returns (ConfirmRecoveryResponse);
+  //Async call to confirm that the robot can be operationally used again, with visual inspection
+  rpc ReleaseToOperational(ReleaseToOperationalRequest) returns (ReleaseToOperationalResponse);
+}
+
+message AutoRecoverBlockingRequest {}
+
+message AutoRecoverBlockingResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.IsTransitioning is_transitioning = 2;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+    Issue.Unknown unknown = 4;
+  }
+}
+
+message AutoRecoverAsyncRequest {}
+
+message AutoRecoverAsyncResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.IsTransitioning is_transitioning = 2;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+    Issue.Unknown unknown = 4;
+  }
+}
+
+message ConfirmRecoveryRequest {}
+
+message ConfirmRecoveryResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+    Issue.Unknown unknown = 4;
+  }
+}
+
+message ReleaseToOperationalRequest {}
+
+message ReleaseToOperationalResponse {
+  message Payload {
+    OperationResult result = 1;
+  }
+  oneof response {
+    Payload ok = 1;
+    Issue.PreconditionNotMet precondition_not_met = 3;
+    Issue.Unknown unknown = 4;
+  }
+}
+
+// -------------------------------------------------------------------
+// Service containing the exposed Robot Service Calls
+// Claims abbreviation: {"roc": {"statepp", "statesp"}
+//--------------------------------------------------------------------
+
+service ROCServiceService {
+  // Call that opens a stream of states and result + strings containing internal detailed (debugging) information.
+  // The content of the detailed information strings are not guaranteed to be stable over software releases, robot models, etc.
+  // Only available to selected audiences. Polling and streaming versions available.
+  // It exposes information on internal state transitions in the internalinfo field of the message.
+  // The contents of this field the are potentionally not stable across versions.
+  rpc StatePollPlus(StatePlusRequest) returns (StatePlusResponse);
+  rpc StateStreamPlus(StatePlusRequest) returns (stream StatePlusResponse);
+}
+
+message StatePlusRequest {}
+
+message StatePlusResponse {
+  RocState state = 1;
+  string internal_info = 3;
+}
