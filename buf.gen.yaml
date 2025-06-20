@@ -1,0 +1,9 @@
+version: v2
+clean: true
+managed: 
+  enabled: true
+plugins:
+  - remote: buf.build/grpc/web:v1.5.0
+    out: gen
+    opt:
+      - mode=grpcwebtext 
